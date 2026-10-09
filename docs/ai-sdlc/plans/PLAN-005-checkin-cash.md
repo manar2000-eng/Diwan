@@ -19,8 +19,8 @@ Check-in and cash record are **one POST → one function**, because they always 
 
 | File | Purpose |
 |------|---------|
-| `dashboard/hub/attendance.php` | `requireRole(['hub_admin','staff'])`. Today's bookings list + "check in" POST per row |
-| `includes/functions.php` *(modify)* | Add `listTodaysBookings()`, `confirmAttendance()`, `recordCash()` |
+| `dashboard/hub/attendance.php` | `requireRole(['hub_admin','staff'])`. Today's bookings list + "check in" POST per row + typed-QR form |
+| `includes/functions.php` *(modify)* | Add `listTodaysBookings()`, `confirmAttendance()`, `recordCash()`, `getPrice()`, `confirmAndPay()`, and a retry wrapper around `createBooking()` |
 
 ## Functions to add
 
@@ -40,15 +40,18 @@ Seats the client can actually scan: this is the offline "is he here" list, so it
 confirmAttendance(hubId, qrCode, staffId)
   BEGIN
     SELECT * FROM bookings
-      WHERE qr_code=? AND hub_id=? AND status IN ('pending','confirmed')
+      WHERE qr_code=? AND hub_id=?     -- the hub_id predicate is the INV-01 guard
       FOR UPDATE
       -> none => 'رمز الحضور غير صالح'
       -> already 'attended' => 'تم تسجيل الحضور مسبقاً'   (guards duplicate scan)
-    UPDATE bookings SET status='attended' WHERE id=?
+      -> 'cancelled' or any other status => 'رمز الحضور غير صالح'
+    UPDATE bookings SET status='attended' WHERE id=? AND hub_id=?
   COMMIT
   returns the booking row so recordCash() can use it
 ```
 `FOR UPDATE` plus the status guard makes a double-tap or double-scan idempotent — the spec's "duplicate QR → error" case, handled by state rather than by a lookup table.
+
+The plan filtered inside the lock with `status IN ('pending','confirmed')`, which would make an already-`attended` booking indistinguishable from a missing one and report `رمز الحضور غير صالح` instead of `تم تسجيل الحضور مسبقاً`. The row is therefore locked by `qr_code + hub_id` only and the status is inspected in PHP.
 
 ```
 recordCash(bookingId, hubId, staffId, amount)
@@ -67,10 +70,12 @@ Price lives on the branch, so a single `SELECT` suffices. No per-shift or per-ro
 
 ```
 confirmAndPay(hubId, qrCode, staffId)      -- thin orchestrator used by the page
-  1. booking = confirmAttendance(...)
+  1. booking = confirmAttendance(...)       -- its own transaction, commits
   2. recordCash(booking.id, hubId, staffId, getPrice(hubId, booking.branch_id))
 ```
 Splitting this from the two primitives keeps `recordCash()` unit-testable and stops the page from ever assembling an amount.
+
+**These two writes are separate transactions, on purpose.** Attendance and payment are not one unit of work: the client did arrive, so attendance must survive even if the cash insert fails. A forced `payments_cash` insert failure therefore leaves the booking `attended` and unpaid, which the page surfaces through the `لم يُحصّل` counter so the owner can settle it. Rolling both back together would erase a fact that actually happened.
 
 ## Page structure (`dashboard/hub/attendance.php`)
 - Today's date, list of bookings: seat code, shift, client name/phone, `qr_code`, status badge.
@@ -108,15 +113,24 @@ Bookings keep existing (only `status` changed, which is revertible); nothing els
 
 | Spec acceptance | Verification | Result |
 |---|---|---|
-| Confirmed booking + valid QR → `attended` + 1 `payments_cash` row with server price | Check in a booking priced 10 → `SELECT status FROM bookings` = `attended`; `SELECT amount FROM payments_cash WHERE booking_id=?` = 10 | ☐ |
-| Same QR twice → error, COUNT payments = 1 | Re-submit the code → exact string `تم تسجيل الحضور مسبقاً`; `SELECT COUNT(*) FROM payments_cash WHERE booking_id=?` = 1 | ☐ |
-| Client role POST → 403 | Client session POSTs `attendance.php` → `403` | ☐ |
-| Tampered POST amount ignored | POST `amount=1` with a 10-priced booking → stored amount is still 10 | ☐ |
-| `hub_id` never from POST | POST `hub_id=<other hub>` → assert `payments_cash.hub_id` equals session hub, and that a QR from another hub is rejected | ☐ |
-| Unknown QR → `رمز الحضور غير صالح` | POST a random string → exact string, no rows changed | ☐ |
-| `pending` booking can be checked in | Seed `status='pending'`, check in → `attended` | ☐ |
-| Today's list is hub-scoped | HubA staff sees only hubA bookings for today | ☐ |
-| Missing CSRF rejected | POST without token → no attendance change | ☐ |
-| Offline-friendly, no live API | Inspect `attendance.php`: no external request, no scanner dependency | ☐ |
-| `php -l` | `php -l dashboard/hub/attendance.php` | ☐ |
-| Reload dashboard, check RTL + size | Load `/dashboard/hub/attendance.php`, confirm RTL and <1.5MB | ☐ |
+| Confirmed booking + valid QR → `attended` + 1 `payments_cash` row with server price | Check in a booking priced 10 → `SELECT status FROM bookings` = `attended`; `SELECT amount FROM payments_cash WHERE booking_id=?` = 10 | ✅ status `attended`, 1 row, amount 10.00, `hub_id` = session hub, `received_by` = staff user |
+| Same QR twice → error, COUNT payments = 1 | Re-submit the code → exact string `تم تسجيل الحضور مسبقاً`; `SELECT COUNT(*) FROM payments_cash WHERE booking_id=?` = 1 | ✅ exact string, still 1 payment, status unchanged; the attended row also loses its check-in button |
+| Client role POST → 403 | Client session POSTs `attendance.php` → `403` | ✅ 403 on GET and POST, 0 payments created |
+| Tampered POST amount ignored | POST `amount=1` with a 10-priced booking → stored amount is still 10 | ✅ `amount=1` and `amount=0` both stored 10.00; the page never reads the field |
+| `hub_id` never from POST | POST `hub_id=<other hub>` → assert `payments_cash.hub_id` equals session hub, and that a QR from another hub is rejected | ✅ hub A staff scanning hub B's QR → `رمز الحضور غير صالح`, 0 payments, hub B booking untouched; spoofed `hub_id`/`staff_id` ignored, 0 rows in hub B |
+| Unknown QR → `رمز الحضور غير صالح` | POST a random string → exact string, no rows changed | ✅ random and empty QR both rejected; a `cancelled` booking's QR is rejected too and stays `cancelled` |
+| `pending` booking can be checked in | Seed `status='pending'`, check in → `attended` | ✅ pending → `attended` with 1 payment row |
+| Today's list is hub-scoped | HubA staff sees only hubA bookings for today | ✅ hub A staff sees hub A only, hub B's QR and price absent; hub B's staff sees the mirror image; hub_admin of hub A also gets 200 |
+| Missing CSRF rejected | POST without token → no attendance change | ✅ `انتهت صلاحية الجلسة`, booking still `confirmed`, 0 payments |
+| Offline-friendly, no live API | Inspect `attendance.php`: no external request, no scanner dependency | ✅ no `http://`/`https://` in the file, no `Html5Qrcode`/`getUserMedia`/`qrcode.min.js`, no QR image generation, no `<script>` |
+| `php -l` | `php -l dashboard/hub/attendance.php` | ✅ 19 PHP files, 0 errors |
+| Reload dashboard, check RTL + size | Load `/dashboard/hub/attendance.php`, confirm RTL and <1.5MB | ✅ RTL shell, well under 1.5MB, no page-specific JS |
+
+Also verified: invalid and future dates redirect with a flash; yesterday's view still renders; `getPrice()` returns 10.00 / 25.00 per hub and throws `الفرع غير موجود` for a foreign branch; `recordCash()` twice → `تم تسجيل الدفعة مسبقاً` with the first amount intact; `confirmAndPay()` returns the booking and amount; a forced `payments_cash` insert failure leaves the booking `attended` and unpaid with no payment row; the totals row shows حجوزات / حضور / نقد محصّل / لم يُحصّل; the row shows `دفعة مسجلة: 10.00` after payment.
+
+Total: 83 checks for PLAN-005. PLAN-000 (34), PLAN-001 (65), PLAN-002 (95), PLAN-003 (87), PLAN-004 (109) and the rollback probe (11) still pass.
+
+## Bug found in PLAN-004 while running PLAN-005
+The PLAN-004 race test had been passing by luck. A dedicated stress run — 30 rounds of three concurrent `createBooking()` calls plus 10 trials of four on a single slot — surfaced `SQLSTATE[40001] ... 1213 Deadlock found`. Under contention InnoDB picks one transaction as the deadlock victim, and the raw driver error reached the caller instead of `المقعد محجوز`.
+
+`createBooking()` is now a thin retry wrapper around `createBookingOnce()`: error 1213 (deadlock) and 1205 (lock wait timeout) roll back and retry up to 3 times with a short backoff, since neither leaves a trace and the FOR UPDATE check is idempotent. Every other rejection returns immediately. After the change the stress run is clean: 40/40 rounds, exactly one winner each, every loser got `المقعد محجوز`, zero driver errors, zero INV-04 violations.

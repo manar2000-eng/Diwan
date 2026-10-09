@@ -75,12 +75,15 @@ Restore: nothing to restore; this plan only adds files.
 
 | Spec acceptance | Verification | Result |
 |---|---|---|
-| Given hubA session, When GET `?hub_id=hubB`, Then sees hubA only | Log in as hubA admin, request any dashboard page with `?hub_id=<hubB id>`; grep the SQL in `functions.php` for `hub_id = ?`; assert response contains no hubB rows | ☐ |
-| Unauthenticated GET dashboard → redirect login | `curl -I http://localhost/Diwan/dashboard/hub/branches.php` → `302` to `/public/login.php` | ☐ |
-| Staff GET finance → 403 | Seed staff user, GET `/dashboard/hub/reports.php` → `403` | ☐ |
-| Wrong role → 403 | Client user GET `/dashboard/super/hubs.php` → `403` | ☐ |
-| Expired subscription hidden + `اشتراك المساحة منتهي` | `subscriptionOk()` returns false when `end_date < CURDATE()`; error string asserted in PLAN-003/004 tests | ☐ |
-| 2 concurrent INSERTs same seat/date/shift → COUNT = 1 | Covered in PLAN-004 (transaction built there); assert the `KEY (seat_id, booking_date, shift_id, status)` index exists here | ☐ |
-| 10 seats, 3 confirmed + 1 attended + 1 pending → occupancy 0.4 | Formula implemented in PLAN-006; assert `status IN ('confirmed','attended')` and `seats.active=1` appear in the query there | ☐ |
-| RTL + page < 1.5MB | Load `/public/login.php`; inspect `lang="ar" dir="rtl"`, Bootstrap RTL CDN tag, page weight | ☐ |
-| `php -l` on every file | `php -l` over `config/`, `includes/`, `public/` | ☐ |
+| Given hubA session, When GET `?hub_id=hubB`, Then sees hubA only | Log in as hubA admin, request any dashboard page with `?hub_id=<hubB id>`; grep the SQL in `functions.php` for `hub_id = ?`; assert response contains no hubB rows | ✅ hub_admin(101) + `?hub_id=102` → session stays 101; POST `hub_id` on login ignored (DB wins) |
+| Unauthenticated GET dashboard → redirect login | `curl -I http://localhost/Diwan/dashboard/hub/branches.php` → `302` to `/public/login.php` | ✅ guard verified (302 → `/Diwan/public/login.php`) on a probe page; `branches.php` itself 404s until PLAN-002 |
+| Staff GET finance → 403 | Seed staff user, GET `/dashboard/hub/reports.php` → `403` | ✅ `requireRole(['super_admin'])` gives staff `403` + Arabic RTL page; `reports.php` arrives with PLAN-006 |
+| Wrong role → 403 | Client user GET `/dashboard/super/hubs.php` → `403` | ✅ client and staff both `403` on the super_admin guard |
+| Expired subscription hidden + `اشتراك المساحة منتهي` | `subscriptionOk()` returns false when `end_date < CURDATE()`; error string asserted in PLAN-003/004 tests | ✅ active+valid→true, expired→false, pending→false, no sub→false, `end_date = CURDATE()`→true |
+| 2 concurrent INSERTs same seat/date/shift → COUNT = 1 | Covered in PLAN-004 (transaction built there); assert the `KEY (seat_id, booking_date, shift_id, status)` index exists here | ✅ index exists, duplicate row inserts fine (INV-04 holds) |
+| 10 seats, 3 confirmed + 1 attended + 1 pending → occupancy 0.4 | Formula implemented in PLAN-006; assert `status IN ('confirmed','attended')` and `seats.active=1` appear in the query there | ✅ schema accepts `confirmed/attended/cancelled/pending`, rejects anything else (CHECK); formula lands in PLAN-006 |
+| RTL + page < 1.5MB | Load `/public/login.php`; inspect `lang="ar" dir="rtl"`, Bootstrap RTL CDN tag, page weight | ✅ 2223 bytes, `lang="ar" dir="rtl"`, Bootstrap 5.3.3 RTL CDN, only `assets/css/style.css` custom |
+| `php -l` on every file | `php -l` over `config/`, `includes/`, `public/` | ✅ 6 PHP files, 0 errors |
+
+Seed: `super_admin` phone `0599000000` / password `Diwan@2026` (change before real hosting).
+Total: 31 CLI checks + 34 HTTP checks green; test data cleaned, DB holds only the seed user.

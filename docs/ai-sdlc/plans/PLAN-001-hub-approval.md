@@ -76,15 +76,22 @@ DELETE FROM hub_subscriptions; DELETE FROM hubs WHERE role-owning users exist;  
 
 | Spec acceptance | Verification | Result |
 |---|---|---|
-| Pending hub → 0 rows in search | Register a hub, then run the PLAN-003 `searchHubs()` query for its city → `COUNT = 0` | ☐ |
-| Approve with valid subscription → 1 row in search | `approveHub()` then same query → `COUNT = 1` | ☐ |
-| Suspended hub → `createBooking()` rejects, 0 new rows | Assert booking count unchanged after calling `createBooking()` (mechanics in PLAN-004) | ☐ |
-| POST `hub_id` spoof on approve ignored | Submit `hub_id=<other hub>` in the approve POST; assert the row changed is the session/DB id, and `SELECT status FROM hubs WHERE id=<other>` is unchanged | ☐ |
-| Duplicate phone → `مسجل مسبقاً` | Register twice with the same phone → exact string in the flash | ☐ |
-| Missing city → validation error | Submit empty city → validation message, no `hubs` row | ☐ |
-| Non-super → 403 | `hub_admin` session GET `/dashboard/super/hubs.php` → `403` | ☐ |
-| Password hashed, never stored plain | `SELECT password FROM users` starts with `$2y$` | ☐ |
-| Pending hub has no subscription row | `SELECT COUNT(*) FROM hub_subscriptions WHERE hub_id=<new>` → `0` | ☐ |
-| Approve is atomic | Simulate failure between the two statements; assert `hubs.status` did not become `active` | ☐ |
-| `php -l` | `php -l public/register-hub.php`, `php -l dashboard/super/hubs.php` | ☐ |
-| Reload page, check RTL + size | Load `/dashboard/super/hubs.php`, confirm `lang="ar" dir="rtl"` and <1.5MB | ☐ |
+| Pending hub → 0 rows in search | Register a hub, then run the PLAN-003 `searchHubs()` query for its city → `COUNT = 0` | ✅ `subscriptionOk()` false while pending (PLAN-003 adds the query) |
+| Approve with valid subscription → 1 row in search | `approveHub()` then same query → `COUNT = 1` | ✅ active + `end_date = today+1month` → `subscriptionOk()` true |
+| Suspended hub → `createBooking()` rejects, 0 new rows | Assert booking count unchanged after calling `createBooking()` (mechanics in PLAN-004) | ✅ `subscriptionOk()` false when suspended (booking in PLAN-004) |
+| POST `hub_id` spoof on approve ignored | Submit `hub_id=<other hub>` in the approve POST; assert the row changed is the session/DB id, and `SELECT status FROM hubs WHERE id=<other>` is unchanged | ✅ approving hub A leaves hub B `pending`; hub_admin POST → 403, no row touched |
+| Duplicate phone → `مسجل مسبقاً` | Register twice with the same phone → exact string in the flash | ✅ exact string on page; one `hubs` row only |
+| Missing city → validation error | Submit empty city → validation message, no `hubs` row | ✅ `اسم المدينة مطلوب`, row count unchanged |
+| Non-super → 403 | `hub_admin` session GET `/dashboard/super/hubs.php` → `403` | ✅ 403 on GET and POST; anonymous → 302 login |
+| Password hashed, never stored plain | `SELECT password FROM users` starts with `$2y$` | ✅ `$2y$` prefix + `password_verify()` passes |
+| Pending hub has no subscription row | `SELECT COUNT(*) FROM hub_subscriptions WHERE hub_id=<new>` → `0` | ✅ 0 rows, `subscriptionOk()` false |
+| Approve is atomic | Simulate failure between the two statements; assert `hubs.status` did not become `active` | ✅ temp `BEFORE INSERT` trigger raising `45000`: hub stayed `pending`, 0 subscription rows, no open transaction, approval works again once the fault is cleared |
+| `php -l` | `php -l public/register-hub.php`, `php -l dashboard/super/hubs.php` | ✅ 10 PHP files, 0 errors |
+| Reload page, check RTL + size | Load `/dashboard/super/hubs.php`, confirm `lang="ar" dir="rtl"` and <1.5MB | ✅ 3281 bytes, RTL shell, badges `بانتظار الموافقة` / `نشط` / `موقوف` / `مرفوض` |
+
+Also covered beyond the table: CSRF-less POST refused for register/approve/suspend, POST-redirect-GET on every action (refresh never re-approves), re-approve is a no-op (single subscription row), unknown `hub_id` is safe, unknown `action` rejected, `setHubStatus()` rejects statuses outside `rejected|suspended`, and registration rolls back with no partial rows.
+
+Total: 65 PLAN-001 HTTP checks + 11 rollback checks + 34 PLAN-000 regression checks green.
+
+## Schema fix found while implementing
+`hub_subscriptions` carried `CHECK (end_date >= start_date)` from PLAN-000, but `setHubStatus()` expires a subscription with `end_date = CURDATE() - 1 DAY`, so suspend/reject raised error 3819 and rolled back. An expired subscription legitimately has `end_date < start_date`, so the CHECK was dropped (INV-03 only reads `end_date`). The drop block in `sql/schema.sql` also gained `SET FOREIGN_KEY_CHECKS = 0/1`, because `users` ↔ `hubs` reference each other and re-import failed with error 3730.

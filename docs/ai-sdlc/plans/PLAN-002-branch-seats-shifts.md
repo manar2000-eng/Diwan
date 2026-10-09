@@ -20,7 +20,9 @@ Add `price_per_hour` to `branches` now (one column) rather than a `rooms` pricin
 | `dashboard/hub/branches.php` | `requireRole(['hub_admin'])`. Create + edit the single branch |
 | `dashboard/hub/seats.php` | List + bulk-add seats per branch |
 | `dashboard/hub/shifts.php` | List + create/update shifts per branch |
-| `includes/functions.php` *(modify)* | Add `createBranch()`, `updateBranch()`, `createSeats()`, `createShift()`, `updateShift()`, `listShifts()` |
+| `includes/functions.php` *(modify)* | Add `sessionHubId()`, `ownedBranch()`, `getBranchForHub()`, `listSeats()`, `normalizeTime()`, `formatTime()`, `assertShiftWindow()`, `createShifts()` next to the planned 6 |
+
+Schema: `branches` gains `price_per_hour DECIMAL(8,2)` (the plan's single price column) and `KEY (hub_id, city, active)` for PLAN-003 search.
 
 ## Functions to add
 
@@ -39,19 +41,22 @@ createSeats(branchId, codes[])      <- one row per code, one transaction
   - Accepts codes[] so the owner can add 20 seats in one POST, not 20 POSTs
     (smallest change that makes seeding realistic; still one INSERT per code)
 
-createShift(branchId, name_ar, start_time, end_time)
+createShifts(branchId, [{name,start,end}, ...])     <- the pair, one transaction
   - hub_id from session; branch must belong to it
-  - start_time < end_time else 'وقت النهاية يجب أن يكون بعد البداية'
-  - overlap: existing WHERE branch_id=? AND active=1
-             AND start_time < new.end_time AND end_time > new.start_time
-             => 'تداخل في الورديات'
+  - < 2 rows in the batch (or batch + existing < 2) => 'مطلوب ورديتان على الأقل'
+  - each row: start_time < end_time else 'وقت النهاية يجب أن يكون بعد البداية'
+  - each row: overlap vs active shifts in the branch AND vs earlier rows of the
+    same batch  => 'تداخل في الورديات'
   - active = 1
-  - MVP guard: COUNT(active shifts in branch) < 2 required, else
-    'مطلوب ورديتان على الأقل'  (blocks 3rd-less setups, not the 2nd one)
 
+createShift(branchId, name_ar, start_time, end_time)   <- single row, no pair rule
 updateShift(shiftId, name_ar, start_time, end_time)
   - re-runs the same start<end + overlap check, excluding itself
 ```
+
+The MVP pair rule lives in the batch function, which is what the form posts, so
+`مطلوب ورديتان على الأقل` is reachable exactly as SPEC-002 states. Single-row
+`createShift()` stays available for seeding and tests.
 
 Overlap is checked in the Logic Layer with a plain `SELECT`, not a lock — two owners editing shifts simultaneously is not a realistic MVP race, and the DB `UNIQUE(branch_id, start_time, end_time)` catches exact duplicates.
 
@@ -84,16 +89,23 @@ PLAN-000 and PLAN-001 are untouched and keep working.
 
 | Spec acceptance | Verification | Result |
 |---|---|---|
-| 1 branch + 10 seats + 2 shifts (08:00-14:00, 14:00-22:00) saved, dashboard counts match DB | Seed via the UI, then compare the on-screen counts against `SELECT COUNT(*) FROM seats WHERE branch_id=? AND active=1` and the shifts list | ☐ |
-| Overlapping 13:00-15:00 → reject, COUNT unchanged | Create 13:00-15:00 on the branch that already has 08:00-14:00 → exact string `تداخل في الورديات`, `COUNT(shifts)` still 2 | ☐ |
-| Cross-hub `shift_id` in booking → reject | HubA `shift_id` passed to hubB's branch → `createBooking()` rejects (mechanics in PLAN-004); here assert `createShift()`/`updateShift()` also reject a foreign `branch_id` | ☐ |
-| `hub_id` never from GET/POST | POST `hub_id=<other>` to seats/shifts → `SELECT hub_id FROM seats WHERE seat_code=<posted>` equals session hub | ☐ |
-| staff/client → 403 on these pages | staff session GET `seats.php` → `403` | ☐ |
-| Missing city → validation error | Submit empty city → message, no `branches` row | ☐ |
-| Duplicate `seat_code` same branch → reject | Add `A-01` twice → `كود المقعد مكرر` | ☐ |
-| `start_time < end_time` enforced | 22:00 → 08:00 → `وقت النهاية يجب أن يكون بعد البداية` | ☐ |
-| Only 1 shift → `مطلوب ورديتان على الأقل` | Create a single shift on a fresh branch → exact string | ☐ |
-| Seat count is the occupancy denominator | `SELECT COUNT(*) FROM seats WHERE active=1` returns the value PLAN-006 divides by | ☐ |
-| Card shows electricity/internet/generator | Values saved in `branches` appear on the PLAN-003 hub card | ☐ |
-| `php -l` | `php -l` on all 3 dashboard files | ☐ |
-| Reload dashboard, check RTL + size | Load `/dashboard/hub/shifts.php`, confirm RTL and <1.5MB | ☐ |
+| 1 branch + 10 seats + 2 shifts (08:00-14:00, 14:00-22:00) saved, dashboard counts match DB | Seed via the UI, then compare the on-screen counts against `SELECT COUNT(*) FROM seats WHERE branch_id=? AND active=1` and the shifts list | ✅ 10 seats in one POST, 2 shifts; on-screen `مقاعد فعّالة: 10` / `ورديات فعّالة: 2` equal the DB counts |
+| Overlapping 13:00-15:00 → reject, COUNT unchanged | Create 13:00-15:00 on the branch that already has 08:00-14:00 → exact string `تداخل في الورديات`, `COUNT(shifts)` still 2 | ✅ exact string, count still 2; also checked within one batch (08:00-14:00 + 13:00-15:00) and on `updateShift()` |
+| Cross-hub `shift_id` in booking → reject | HubA `shift_id` passed to hubB's branch → `createBooking()` rejects (mechanics in PLAN-004); here assert `createShift()`/`updateShift()` also reject a foreign `branch_id` | ✅ `createSeats/createShift/createShifts/updateShift` all throw `الفرع غير موجود` / `الوردية غير موجودة` for hub B's ids; nothing leaked into hub B |
+| `hub_id` never from GET/POST | POST `hub_id=<other>` to seats/shifts → `SELECT hub_id FROM seats WHERE seat_code=<posted>` equals session hub | ✅ POSTed `hub_id=hubB&branch_id=branchB` landed in hub A; hub B stayed empty |
+| staff/client → 403 on these pages | staff session GET `seats.php` → `403` | ✅ 403 on branches/seats/shifts for staff and for client; anonymous → 302 login |
+| Missing city → validation error | Submit empty city → message, no `branches` row | ✅ `اسم المدينة مطلوب`, no row created |
+| Duplicate `seat_code` same branch → reject | Add `A-01` twice → `كود المقعد مكرر` | ✅ exact string; batch containing one duplicate rolls the whole batch back |
+| `start_time < end_time` enforced | 22:00 → 08:00 → `وقت النهاية يجب أن يكون بعد البداية` | ✅ exact string; also rejects `24:00`, `8:60`, and non-numeric input |
+| Only 1 shift → `مطلوب ورديتان على الأقل` | Create a single shift on a fresh branch → exact string | ✅ exact string, 0 rows inserted |
+| Seat count is the occupancy denominator | `SELECT COUNT(*) FROM seats WHERE active=1` returns the value PLAN-006 divides by | ✅ `COUNT(seats WHERE active=1)` = 11 after all adds; that is the INV-05 denominator |
+| Card shows electricity/internet/generator | Values saved in `branches` appear on the PLAN-003 hub card | ✅ stored `grid` / `excellent` / `generator`, rendered back on the page (card itself is PLAN-003) |
+| `php -l` | `php -l` on all 3 dashboard files | ✅ 13 PHP files, 0 errors |
+| Reload dashboard, check RTL + size | Load `/dashboard/hub/shifts.php`, confirm RTL and <1.5MB | ✅ branches 4658 B, seats 3027 B, shifts 4573 B, all RTL |
+
+Total: 95 checks green. Back-to-back shifts (08:00-14:00 + 14:00-22:00, and 22:00-23:00 + 23:00-23:30) are accepted, since the overlap test is `start < existing.end AND end > existing.start`. Editing a shift with its own unchanged window is also accepted (excluded from the overlap check).
+
+Seeded hub for the later plans: hub `مساحة النخيل` / غزة, branch with power `grid`, net `excellent`, generator, 10.00/hour; 10 seats `A-01..A-10`; shifts 08:00-14:00 and 14:00-22:00. Logins (password `Diwan@2026`): `0597000001` hub_admin, `0597000002` staff, `0597000003` client, `0599000000` super_admin.
+
+## Bug found while implementing
+`normalizeTime()` returned `'8:00:00'` for `08:00`, and shift windows are compared as strings — so `'8:00:00' >= '14:00:00'` wrongly reported `وقت النهاية يجب أن يكون بعد البداية` and no shift could ever be created. The hour is now zero-padded. Separately, the batch form did not check overlap against earlier rows of its own batch, only against shifts already stored; that check is now inside the insert loop.

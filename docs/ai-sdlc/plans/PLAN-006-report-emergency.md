@@ -16,9 +16,11 @@ Two pages and four functions. No charting library — the report is a 4-row tabl
 
 | File | Purpose |
 |------|---------|
-| `dashboard/hub/reports.php` | `requireRole(['hub_admin'])` — **staff must get 403**. Date picker + totals |
-| `dashboard/hub/emergency.php` | `requireRole(['hub_admin'])` — form to close a branch for a date |
-| `includes/functions.php` *(modify)* | Add `getDailyReport()`, `getOccupancy()`, `addEmergencyClose()`, `listClosures()` |
+| `dashboard/hub/reports.php` | `requireRole(['hub_admin'])` — **staff must get 403**. Date picker + totals + occupancy table |
+| `dashboard/hub/emergency.php` | `requireRole(['hub_admin'])` — form to close a branch for a date, plus the closure list with a remove action |
+| `includes/functions.php` *(modify)* | Add `getDailyReport()`, `getOccupancy()`, `addEmergencyClose()`, `listClosures()`, `removeEmergencyClose()` |
+
+Step 4 ("wire the emergency clause into PLAN-003/004") needed no change: both clauses shipped with those plans and were only waiting for rows. Closing a date is what makes them live.
 
 ## Functions to add
 

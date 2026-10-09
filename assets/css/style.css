@@ -1,0 +1,59 @@
+/* Diwan - custom CSS only (INV-06: no inline styles, no other stylesheets). */
+
+:root {
+    --diwan-primary: #0d6e6e;
+}
+
+body.diwan-body {
+    font-family: "Segoe UI", Tahoma, "Noto Naskh Arabic", Arial, sans-serif;
+    background-color: #f6f8f8;
+    min-height: 100vh;
+}
+
+.diwan-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.diwan-brand {
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: var(--diwan-primary);
+    text-decoration: none;
+}
+
+/* PLAN-003: hub photo is a CSS block, not an upload. Keeps the page light on
+   Gaza bandwidth (INV-06) and avoids a broken <img> while no photo exists. */
+.hub-photo-placeholder {
+    height: 96px;
+    border-radius: .5rem;
+    background: linear-gradient(135deg, var(--diwan-primary), #14b8a6);
+    margin-bottom: .75rem;
+}
+
+.hub-card-meta {
+    font-size: .875rem;
+    line-height: 1.6;
+}
+
+/* Mobile-first: comfortable tap targets, no horizontal scroll. */
+.form-control,
+.form-select,
+.btn {
+    min-height: 44px;
+}
+
+.card {
+    border: 0;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+}
+
+.login-card {
+    max-width: 420px;
+    margin: 0 auto;
+}
+
+.text-muted {
+    font-size: .875rem;
+}
